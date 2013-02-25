@@ -1,0 +1,28 @@
+name:                generics-annotate
+version:             0.1
+synopsis:            Macros to annotate a data structure
+description:         Macros to annotate a data structure
+		     .
+		     Requires the @TemplateHaskell@ and @QuasiQuotes@ extensions.
+-- description:         
+license:             BSD3
+license-file:        LICENSE
+author:              Dominic Orchard <dom.orchard@gmail.com>
+maintainer:          Dominic Orchard <dom.orchard@gmail.com>
+stability:           experimental
+-- copyright:           
+category:            Language
+build-type:          Simple
+cabal-version:       >=1.7
+
+source-repository head
+  type:     git
+  location: git://github.com/dorchard/generic-annotate
+
+library
+  exposed-modules:     Data.Generics.Annotate
+  build-depends:       base >= 4.2 && < 5,
+                       template-haskell >= 2.7,
+                       haskell-src-meta >= 0.5.1,
+                       uniplate >= 1.6
+  hs-source-dirs:      src
