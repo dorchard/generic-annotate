@@ -11,6 +11,9 @@
 > import Data.Generics.Uniplate.Operations 
 > import Data.Generics.Uniplate.Data
 
+
+> import Debug.Trace
+
 ------------------------------------------------------------
 Primary annotation macro
 -------------------------------------------------------------
@@ -45,10 +48,19 @@ Annotate types if in the scope of the annotation
 > paramTyp ty (ConT n) | (elem n ?tnames) = AppT (ConT n) ty
 > paramTyp _ t = t
 
+> isAno :: (?tnames :: [Name]) => Type -> Bool
+> isAno (ConT n) | (elem n ?tnames) = True
+> isAno t = False
+ 
+
+> paramTypForall :: (?tnames :: [Name], ?pname :: Name) => Type -> Type -- bit of a hack at the moment really, just trying to see if useful approach
+> paramTypForall t = if (para (\t -> \ts -> (or ts) || (isAno t)) t) then ForallT [PlainTV ?pname] [] t
+>                    else t
+
 Annotate expressions if in the scope of the annotation block
 
 > paramExp :: (?conNames :: [Name]) => Exp -> Exp
-> paramExp (ConE n) | (elem n ?conNames) = AppE (ConE n) (TupE [])
+> paramExp (ConE n) | (elem n ?conNames) = AppE (ConE n) (VarE (mkName "undefined")) -- AppE (ConE n) (TupE []) -- 
 > paramExp e = e
 
 Annotate patterns if in the scope of the annotation block
@@ -76,7 +88,10 @@ within other declarations of types, expressions, and patterns
 > paramDec (DataD ctxt name ty cons names) =
 >              let ?tname = name
 >              in DataD ctxt name ((PlainTV ?pname):ty) (map paramCon cons) names
-> paramDec d = (transformBi paramExp) . (transformBi paramPat) . (transformBi (paramTyp (TupleT 0))) $ d
+> paramDec (InstanceD ctxt typ decs) = InstanceD ctxt (transform (paramTyp (VarT ?pname)) $ typ) (map paramDec decs)
+> paramDec d = (transformBi paramExp) . (transformBi paramPat) . (descendBi paramTypForall) . (transformBi (paramTyp (VarT ?pname))) $ d
+
+ paramDec d = (transformBi paramExp) . (transformBi paramPat) . (transformBi (paramTyp (TupleT 0))) $ d
 
 Get a list of constructor names declared in the block
 
@@ -103,7 +118,8 @@ Parameterised declaration annotations (parameterised by modules)
 >                           (paramsString, rest) = parse False s
 >                       in 
 >                         let ?fromModules = groupBy (==',') paramsString
->                         in either error (mapM paramFroms)(parseDecs rest)
+>                         in do pname <- newName "p"
+>                               let ?pname = pname in either error (mapM paramFroms) (parseDecs rest)
 
 Decide when to annotate something
 
@@ -114,16 +130,16 @@ Decide when to annotate something
 >                                                Just m -> if (m `elem` ?fromModules) then true
 >                                                          else false
 
-> paramTypFrom :: (?fromModules :: [String]) => Type -> Q Type
+> paramTypFrom :: (?pname :: Name, ?fromModules :: [String]) => Type -> Q Type
 > paramTypFrom (ConT n) | (nameBase n) == "()" = return $ TupleT 0 -- Weird fix to do with () constructor
-> paramTypFrom (ConT n) = doAnnotate n lookupTypeName (ConT n) (AppT (ConT n) (TupleT 0)) 
+> paramTypFrom (ConT n) = doAnnotate n lookupTypeName (ConT n) (AppT (ConT n) (TupleT 0))  -- (AppT (ConT n) (VarT ?pname))
 > paramTypFrom t = return t
 
-> paramExpFrom :: (?fromModules :: [String]) => Exp -> Q Exp
-> paramExpFrom (ConE n) = doAnnotate n lookupValueName (ConE n) (AppE (ConE n) (TupE []))
+> paramExpFrom :: (?pname :: Name, ?fromModules :: [String]) => Exp -> Q Exp
+> paramExpFrom (ConE n) = doAnnotate n lookupValueName (ConE n)  (AppE (ConE n) (TupE [])) -- (AppE (ConE n) (VarE $ mkName "undefined"))
 > paramExpFrom e = return e
 
-> paramPatFrom :: (?fromModules :: [String]) => Pat -> Q Pat
+> paramPatFrom :: (?pname :: Name, ?fromModules :: [String]) => Pat -> Q Pat
 > paramPatFrom (ConP n ps) = doAnnotate n lookupValueName (ConP n ps) (ConP n (WildP:ps))
 > paramPatFrom p = return p
 
@@ -137,3 +153,22 @@ Decide when to annotate something
 >                         >>= (transformBiM paramPatFrom)
 >                         >>= (transformBiM paramExpFrom)
 
+                         >>= (descendBiM paramTypForallFrom)
+
+ doAnnotat :: (?fromModules :: [String]) => Type -> Q Bool
+ doAnnotat (ConT n) = do n' <- lookupTypeName (nameBase n)
+                         return $ case n' >>= nameModule of
+                                     Nothing -> False
+                                     Just m -> if (m `elem` ?fromModules) then True
+                                               else False
+ doAnnotat t = return False
+
+ paramTypForallFrom :: (?pname :: Name, ?fromModules :: [String]) => Type -> Q Type -- bit of a hack at the moment really, just trying to see if useful approach
+ paramTypForallFrom t = do cond <- (para (\t -> \ts -> do cond <- doAnnotat t
+                                                          conds <- sequence ts
+                                                          return $ ((or conds) || cond)) t)
+                           return $ if cond then ForallT [PlainTV ?pname] [] t else t
+
+
+(or ts) || (isAno t)) t) then ForallT [PlainTV ?pname] [] t
+                    else t
