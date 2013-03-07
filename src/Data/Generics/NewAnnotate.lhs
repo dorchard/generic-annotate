@@ -4,16 +4,13 @@
 
 > import Language.Haskell.TH.Syntax
 > import Language.Haskell.TH.Quote
-> import Language.Haskell.Exts.Parser
-> import qualified Language.Haskell.Exts as Exts
-
 > import Language.Haskell.Meta
 
 > import Data.Maybe
-> import Data.List((\\), nub)
 
 > import Data.Generics.Uniplate.Operations 
 > import Data.Generics.Uniplate.Data
+
 
 > import Debug.Trace
 
@@ -22,19 +19,7 @@ Primary annotation macro
 -------------------------------------------------------------
 
 > annotate = QuasiQuoter { quoteExp = err, quoteType = err, quotePat = err, 
->                          quoteDec = \s -> do -- Pull in the origin file and extract its extensions
->                                              loc <- location
->                                              f <- runIO $ readFile (loc_filename loc) 
->                                              let exts = case (Exts.readExtensions f) of
->                                                           Nothing -> []
->                                                           Just exts' -> exts'
->                                              -- Parse the annotation fragment with these extensions
->                                              let mode = Exts.ParseMode { parseFilename = "", extensions = exts,
->                                                                     ignoreLanguagePragmas = False,
->                                                                     ignoreLinePragmas = False, fixities = Nothing }
->                                              case (parseModuleWithMode mode s) of
->                                                ParseOk (Exts.Module _ _ _ _ _ _ decls) -> annotateDecs (fmap toDec decls)
->                                                ParseFailed loc mesg -> error (show loc ++ mesg) }
+>                          quoteDec = \s -> either error annotateDecs (parseDecs s) }
 
 Annotate declarations
 
@@ -63,26 +48,14 @@ Annotate types if in the scope of the annotation
 > paramTyp ty (ConT n) | (elem n ?tnames) = AppT (ConT n) ty
 > paramTyp _ t = t
 
-Calculates if a type contains an annotated type 
-
-> hasAnnotation :: (?tnames :: [Name]) => Type -> Bool
-> hasAnnotation (ConT n) | (elem n ?tnames) = True
-> hasAnnotation t = False
+> isAno :: (?tnames :: [Name]) => Type -> Bool
+> isAno (ConT n) | (elem n ?tnames) = True
+> isAno t = False
  
-Compute free variables in a type
 
-> freeVars :: Type -> [Name]
-> freeVars t = nub $ (([v | VarT v <- universeBi t]) \\ [v | PlainTV v <- universeBi t]) \\ [v | KindedTV v _ <- universeBi t]
-
-Add "ForAll" wrappers on those types (top-level) which have annotations added to them
-Bit of a hack at the moment really, just trying to see if useful approach
-
-> paramTypForall :: (?tnames :: [Name], ?pname :: Name) => Type -> Type 
-> paramTypForall t | (para (\t -> \ts -> (or ts) || (hasAnnotation t)) t) =
->                      case t of
->                        (ForallT vars ctxt typ) -> ForallT ((PlainTV ?pname):vars) ctxt typ
->                        _                       -> ForallT (map PlainTV (freeVars t)) [] t
-> paramTypForall t = t
+> paramTypForall :: (?tnames :: [Name], ?pname :: Name) => Type -> Type -- bit of a hack at the moment really, just trying to see if useful approach
+> paramTypForall t = if (para (\t -> \ts -> (or ts) || (isAno t)) t) then ForallT [PlainTV ?pname] [] t
+>                    else t
 
 Annotate expressions if in the scope of the annotation block
 
@@ -115,13 +88,16 @@ within other declarations of types, expressions, and patterns
 > paramDec (DataD ctxt name ty cons names) =
 >              let ?tname = name
 >              in DataD ctxt name ((PlainTV ?pname):ty) (map paramCon cons) names
-> paramDec (InstanceD ctxt typ decs) = InstanceD (transformBi (paramTyp (VarT ?pname)) ctxt) (transform (paramTyp (VarT ?pname)) $ typ) (map paramDec decs)
+> paramDec (InstanceD ctxt typ decs) = InstanceD ctxt (transform (paramTyp (VarT ?pname)) $ typ) (map paramDec decs)
 > paramDec d = (transformBi paramExp) . (transformBi paramPat) . (descendBi paramTypForall) . (transformBi (paramTyp (VarT ?pname))) $ d
+
+ paramDec d = (transformBi paramExp) . (transformBi paramPat) . (transformBi (paramTyp (TupleT 0))) $ d
 
 Get a list of constructor names declared in the block
 
+
 ------------------------------------------------------------
-Secondary annotation macro - still needs some work
+Secondary annotation macro
 -------------------------------------------------------------
 
 Annotate only type/data constructors from modules specified in the format {Module1, Module2}
@@ -143,7 +119,7 @@ Parameterised declaration annotations (parameterised by modules)
 >                       in 
 >                         let ?fromModules = groupBy (==',') paramsString
 >                         in do pname <- newName "p"
->                               let ?pname = pname in either error (mapM paramFroms) (parseDecs rest)
+>                               let ?pname = pname in either error (mapM paramDecFrom) (parseDecs rest)
 
 Decide when to annotate something
 
@@ -154,13 +130,18 @@ Decide when to annotate something
 >                                                Just m -> if (m `elem` ?fromModules) then true
 >                                                          else false
 
-> paramTypFrom :: (?pname :: Name, ?fromModules :: [String]) => Type -> Q Type
-> paramTypFrom (ConT n) | (nameBase n) == "()" = return $ TupleT 0 -- Weird fix to do with () constructor
-> paramTypFrom (ConT n) = doAnnotate n lookupTypeName (ConT n) (AppT (ConT n) (TupleT 0))  -- (AppT (ConT n) (VarT ?pname))
-> paramTypFrom t = return t
+> paramDecFrom :: (?pname :: Name, ?fromModules :: [String]) => Dec -> Q Dec
+> paramDecFrom d@(DataD ctxt name ty cons names) = transformBiM (paramTypFrom (TupleT 0)) d
+> paramDecFrom d@(InstanceD ctxt typ decs) = (transformBiM (paramTypFrom (VarT ?pname)) d) >>= paramFromsRest
+> paramDecFrom d = paramFroms d
+
+> paramTypFrom :: (?pname :: Name, ?fromModules :: [String]) => Type -> Type -> Q Type
+> paramTypFrom _ (ConT n) | (nameBase n) == "()" = return $ TupleT 0 -- Weird fix to do with () constructor
+> paramTypFrom typ (ConT n) = doAnnotate n lookupTypeName (ConT n) (AppT (ConT n) typ) -- (VarT ?pname)) -- (AppT (ConT n) (TupleT 0))  --
+> paramTypFrom _ t = return t
 
 > paramExpFrom :: (?pname :: Name, ?fromModules :: [String]) => Exp -> Q Exp
-> paramExpFrom (ConE n) = doAnnotate n lookupValueName (ConE n)  (AppE (ConE n) (TupE [])) -- (AppE (ConE n) (VarE $ mkName "undefined"))
+> paramExpFrom (ConE n) = doAnnotate n lookupValueName (ConE n)  (AppE (ConE n) (VarE $ mkName "undefined")) --  (AppE (ConE n) (TupE [])) --
 > paramExpFrom e = return e
 
 > paramPatFrom :: (?pname :: Name, ?fromModules :: [String]) => Pat -> Q Pat
@@ -173,26 +154,23 @@ Decide when to annotate something
 > groupBy' f (x:xs) r | f x = (r ++ [x]):(groupBy' f xs [])
 >                     | otherwise = groupBy' f xs (r ++ [x])
 
-> paramFroms p = return p >>= (transformBiM paramTypFrom)
->                         >>= (transformBiM paramPatFrom)
->                         >>= (transformBiM paramExpFrom)
+> paramFroms p = return p >>= (transformBiM (paramTypFrom (VarT ?pname))) >>= paramFromsRest
 
-                         >>= (descendBiM paramTypForallFrom)
-
- doAnnotat :: (?fromModules :: [String]) => Type -> Q Bool
- doAnnotat (ConT n) = do n' <- lookupTypeName (nameBase n)
-                         return $ case n' >>= nameModule of
-                                     Nothing -> False
-                                     Just m -> if (m `elem` ?fromModules) then True
-                                               else False
- doAnnotat t = return False
-
- paramTypForallFrom :: (?pname :: Name, ?fromModules :: [String]) => Type -> Q Type -- bit of a hack at the moment really, just trying to see if useful approach
- paramTypForallFrom t = do cond <- (para (\t -> \ts -> do cond <- doAnnotat t
-                                                          conds <- sequence ts
-                                                          return $ ((or conds) || cond)) t)
-                           return $ if cond then ForallT [PlainTV ?pname] [] t else t
+> paramFromsRest p = return p >>= (transformBiM paramPatFrom)
+>                             >>= (transformBiM paramExpFrom)
+>                              >>= (descendBiM paramTypForallFrom)
 
 
-(or ts) || (hasAnnotation t)) t) then ForallT [PlainTV ?pname] [] t
-                    else t
+> doAnnotat :: (?fromModules :: [String]) => Type -> Q Bool
+> doAnnotat (ConT n) = do n' <- lookupTypeName (nameBase n)
+>                         return $ case n' >>= nameModule of
+>                                     Nothing -> False
+>                                     Just m -> if (m `elem` ?fromModules) then True
+>                                               else False
+> doAnnotat t = return False
+
+> paramTypForallFrom :: (?pname :: Name, ?fromModules :: [String]) => Type -> Q Type -- bit of a hack at the moment really, just trying to see if useful approach
+> paramTypForallFrom t = do cond <- (para (\t -> \ts -> do cond <- doAnnotat t
+>                                                          conds <- sequence ts
+>                                                          return $ ((or conds) || cond)) t)
+>                           return $ if cond then ForallT [PlainTV ?pname] [] t else t

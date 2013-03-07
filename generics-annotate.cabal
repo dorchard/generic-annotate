@@ -24,5 +24,6 @@ library
   build-depends:       base >= 4.2 && < 5,
                        template-haskell >= 2.7,
                        haskell-src-meta >= 0.5.1,
+                       haskell-src-exts >= 1.13,
                        uniplate >= 1.6
   hs-source-dirs:      src
